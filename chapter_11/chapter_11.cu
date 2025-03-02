@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <time.h>
 
-#define ARRAY_LENGTH 512
+#define ARRAY_LENGTH 1000000000
 #define BLOCK_SIZE 64
 #define SECTION_SIZE 64
 
@@ -77,36 +77,90 @@ __global__ void brent_kung_scan_kernel(float *X, float *Y, unsigned int N)
         Y[i + blockDim.x] = XY[threadIdx.x + blockDim.x];
 }
 
-// __global__ void segmented_scan_kernel(float *X, float *Y, unsigned int N, float *aux_array, unsigned int M)
-// {
-//     // First kernel uses scan on each separate block
-//     __shared__ float XY[SECTION_SIZE];
-//     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-//     if (i < N)
-//     {
-//         XY[threadIdx.x] = X[i];
-//     }
-//     else
-//     {
-//         XY[threadIdx.x] = 0.0f;
-//     }
-//     for (unsigned int stride = 1; stride < blockDim.x; stride *= 2)
-//     {
-//         __syncthreads();
-//         float temp; // store res in tmp to prevent race conditions
-//         if (threadIdx.x >= stride)
-//             temp = XY[threadIdx.x] + XY[threadIdx.x - stride];
-//         __syncthreads();
-//         if (threadIdx.x >= stride)
-//             XY[threadIdx.x] = temp;
-//     }
-//     __syncthreads();
-//     // Scan result for each block is stored in aux_array
-//     if (threadIdx.x == blockDim.x - 1)
-//     {
-//         aux_array[blockIdx.x] = XY[threadIdx.x];
-//     }
-// }
+// Helper kernel for the first phase of segmented scan
+__global__ void block_scan_kernel(float *X, float *Y, float *block_sums, unsigned int N)
+{
+    __shared__ float XY[SECTION_SIZE];
+    unsigned int i = 2 * blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load data into shared memory
+    if (i < N)
+        XY[threadIdx.x] = X[i];
+    else
+        XY[threadIdx.x] = 0.0f;
+
+    if (i + blockDim.x < N)
+        XY[threadIdx.x + blockDim.x] = X[i + blockDim.x];
+    else
+        XY[threadIdx.x + blockDim.x] = 0.0f;
+
+    // Perform Brent-Kung scan on this block
+    for (unsigned int stride = 1; stride <= blockDim.x; stride *= 2)
+    {
+        __syncthreads();
+        unsigned int index = (threadIdx.x + 1) * 2 * stride - 1;
+        if (index < SECTION_SIZE)
+        {
+            XY[index] += XY[index - stride];
+        }
+    }
+
+    for (int stride = SECTION_SIZE / 4; stride > 0; stride /= 2)
+    {
+        __syncthreads();
+        unsigned int index = (threadIdx.x + 1) * stride * 2 - 1;
+        if (index + stride < SECTION_SIZE)
+        {
+            XY[index + stride] += XY[index];
+        }
+    }
+
+    __syncthreads();
+
+    // Write results back to global memory
+    if (i < N)
+        Y[i] = XY[threadIdx.x];
+    if (i + blockDim.x < N)
+        Y[i + blockDim.x] = XY[threadIdx.x + blockDim.x];
+
+    // Store the sum of this block for the next phase
+    if (threadIdx.x == 0 && block_sums != NULL)
+    {
+        block_sums[blockIdx.x] = XY[SECTION_SIZE - 1];
+    }
+}
+
+// Helper kernel to add block sums to each element
+__global__ void add_block_sums_kernel(float *Y, float *block_sums, unsigned int N)
+{
+    unsigned int i = 2 * blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (blockIdx.x > 0)
+    {
+        float sum = block_sums[blockIdx.x - 1];
+        if (i < N)
+            Y[i] += sum;
+        if (i + blockDim.x < N)
+            Y[i + blockDim.x] += sum;
+    }
+}
+
+// Remove the __global__ qualifier and make this a host function
+void segmented_scan(float *X, float *Y, unsigned int N, float *aux_array, unsigned int M)
+{
+    // First phase: Scan each block independently and store block sums
+    block_scan_kernel<<<M, BLOCK_SIZE>>>(X, Y, aux_array, N);
+
+    // Second phase: Scan the block sums
+    if (M > 1)
+    {
+        // Scan the auxiliary array containing block sums
+        block_scan_kernel<<<1, BLOCK_SIZE>>>(aux_array, aux_array, NULL, M);
+
+        // Third phase: Add the scanned block sums back to each block
+        add_block_sums_kernel<<<M, BLOCK_SIZE>>>(Y, aux_array, N);
+    }
+}
 
 int main()
 {
@@ -172,14 +226,11 @@ int main()
 
     // Wait for the segmented scan kernel for arbitrary input sizes to complete
     cudaEventRecord(gpu_start);
-    unsigned int num_blocks = ARRAY_LENGTH / BLOCK_SIZE;
+    unsigned int num_blocks = (ARRAY_LENGTH + BLOCK_SIZE - 1) / BLOCK_SIZE;
     float *d_aux_array;
     cudaMalloc((void **)&d_aux_array, num_blocks * sizeof(float));
 
-    // segmented_scan_kernel<<<gridDim, blockDim>>>(d_x, d_y, ARRAY_LENGTH, d_aux_array, num_blocks);
-
-    // Final step to combine results
-    // TODO: Implement the final step to combine results
+    segmented_scan(d_x, d_y, ARRAY_LENGTH, d_aux_array, num_blocks);
 
     cudaEventRecord(gpu_stop);
     cudaEventSynchronize(gpu_stop);
