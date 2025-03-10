@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <time.h>
 
-#define ARRAY_LENGTH 1000000
+#define ARRAY_LENGTH 1000000000
 
 void h_merge_sequential(int *A, int *B, int *C, int m, int n)
 {
