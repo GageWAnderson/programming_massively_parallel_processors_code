@@ -10,7 +10,7 @@
 
 // NOTE: CUDA launch parameters are needed at compile-time
 
-// COO Matrix data structure for sparse matricies
+// COO (Coordinate list) Matrix data structure for sparse matricies
 typedef struct
 {
     unsigned int numRows;

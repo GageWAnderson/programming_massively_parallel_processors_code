@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <time.h>
 
-#define ARRAY_SIZE 1024
+#define ARRAY_SIZE 1000000000
 #define BLOCK_DIM 64
 #define THREADS_PER_BLOCK (ARRAY_SIZE / 2)
 
